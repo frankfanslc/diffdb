@@ -179,12 +179,14 @@ func (diff *Differential) Each(ctx context.Context, f func(Decoder) error) error
 		bsp := b.Bucket(bucketSeqPending)
 
 		un := new(msgpackDecoder)
+		
+		cur := bsp.Cursor()
 
-		return bsp.ForEach(func(id, data []byte) error {
-
+		for id, data := cur.First(); id != nil; id, data = cur.Next() {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				fe = multierror.Append(fe, ctx.Err())
+				return nil
 			default:
 			}
 
@@ -192,10 +194,14 @@ func (diff *Differential) Each(ctx context.Context, f func(Decoder) error) error
 			un.data = data
 			if err := f(un); err != nil {
 				fe = multierror.Append(fe, err)
-				return nil
+				continue
 			}
-			return bsp.Delete(id)
-		})
+			if err := bsp.Delete(id); err != nil {
+				return err
+			}
+		}
+
+		return nil
 	})
 
 	// Return any errors raised by BoltDB itself
