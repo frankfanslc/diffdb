@@ -38,8 +38,8 @@ type DB struct {
 	db *bolt.DB
 }
 
-// New creates a new named differential.
-func (db *DB) New(name string) (*Differential, error) {
+// Open opens a named differential or creates one if it does not exist.
+func (db *DB) Open(name string) (*Differential, error) {
 	q := []byte(name)
 	err := db.db.Update(func(tx *bolt.Tx) error {
 		b, err := tx.CreateBucketIfNotExists(q)
@@ -179,7 +179,7 @@ func (diff *Differential) Each(ctx context.Context, f func(Decoder) error) error
 		bsp := b.Bucket(bucketSeqPending)
 
 		un := new(msgpackDecoder)
-		
+
 		cur := bsp.Cursor()
 
 		for id, data := cur.First(); id != nil; id, data = cur.Next() {
