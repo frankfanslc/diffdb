@@ -1,15 +1,14 @@
 package diffdb
 
 import (
-	"github.com/boltdb/bolt"
-	"os"
 	"bytes"
-	"gopkg.in/vmihailenco/msgpack.v2"
 	"encoding/binary"
-	"github.com/mitchellh/hashstructure"
+	"github.com/boltdb/bolt"
 	"github.com/hashicorp/go-multierror"
+	"github.com/mitchellh/hashstructure"
+	"gopkg.in/vmihailenco/msgpack.v2"
+	"os"
 )
-
 
 // A Decoder decodes serialised byte data of a diff entry into a native object.
 // The object passed to Decode should be the same type added to the diff.
@@ -30,7 +29,7 @@ func New(path string) (*DB, error) {
 }
 
 var (
-	bucketIDHashMap = []byte("hashmap")
+	bucketIDHashMap  = []byte("hashmap")
 	bucketSeqPending = []byte("pending")
 )
 
@@ -64,7 +63,7 @@ func (db *DB) New(name string) (*Differential, error) {
 	}
 
 	return &Differential{
-		q: q,
+		q:  q,
 		db: db.db,
 	}, nil
 }
@@ -84,8 +83,8 @@ func (db *DB) Close() error {
 
 // A Differential tracks changes between serialised Go objects.
 type Differential struct {
-	q []byte
-	db *bolt.DB
+	q    []byte
+	db   *bolt.DB
 	cols []string
 }
 
@@ -130,13 +129,12 @@ func (diff *Differential) Add(id []byte, x interface{}) error {
 	})
 }
 
-
 // Count counts the number of entries in the hash tracking table.
 // In other words, this is the amount of all items tracked by the differential db.
 func (diff *Differential) Count() (count int) {
 	diff.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(diff.q)
-		count= b.Bucket(bucketIDHashMap).Stats().KeyN
+		count = b.Bucket(bucketIDHashMap).Stats().KeyN
 		return nil
 	})
 
@@ -153,7 +151,6 @@ func (diff *Differential) PendingChanges() (pending int) {
 
 	return
 }
-
 
 var _ Decoder = (*msgpackDecoder)(nil)
 
