@@ -8,6 +8,7 @@ import (
 	"github.com/mitchellh/hashstructure"
 	"gopkg.in/vmihailenco/msgpack.v2"
 	"os"
+	"context"
 )
 
 // A Decoder decodes serialised byte data of a diff entry into a native object.
@@ -170,7 +171,7 @@ func (msg *msgpackDecoder) Decode(x interface{}) error {
 //
 // Each call to f that raises an error will be appended to a multierror slice unless reading the database itself
 // raises an error.
-func (diff *Differential) Each(f func(Decoder) error) error {
+func (diff *Differential) Each(ctx context.Context, f func(Decoder) error) error {
 	var fe, ue error
 
 	ue = diff.db.Update(func(tx *bolt.Tx) error {
@@ -180,6 +181,14 @@ func (diff *Differential) Each(f func(Decoder) error) error {
 		un := new(msgpackDecoder)
 
 		return bsp.ForEach(func(id, data []byte) error {
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+
 			un.data = data
 			if err := f(un); err != nil {
 				fe = multierror.Append(fe, err)
