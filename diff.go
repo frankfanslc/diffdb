@@ -11,6 +11,17 @@ import (
 	"context"
 )
 
+func HashOf(x interface{}) ([]byte, error) {
+	// Generate the hash using hashstructure
+	huint64, err := hashstructure.Hash(x, nil)
+	if err != nil {
+		return nil, err
+	}
+	var hash = make([]byte, 8)
+	binary.LittleEndian.PutUint64(hash, huint64)
+	return hash, nil
+}
+
 // A Decoder decodes serialised byte data of a diff entry into a native object.
 // The object passed to Decode should be the same type added to the diff.
 type Decoder interface {
@@ -30,8 +41,9 @@ func New(path string) (*DB, error) {
 }
 
 var (
-	bucketIDHashMap  = []byte("hashmap")
-	bucketSeqPending = []byte("pending")
+	bucketHashes = []byte("_m")
+	bucketPendingHashes   = []byte("_ph")
+	bucketPendingHashData  = []byte("_pd")
 )
 
 type DB struct {
@@ -46,12 +58,16 @@ func (db *DB) Open(name string) (*Differential, error) {
 		if err != nil {
 			return err
 		}
-		_, err = b.CreateBucketIfNotExists(bucketIDHashMap)
+
+		_, err = b.CreateBucketIfNotExists(bucketHashes)
 		if err != nil {
 			return err
 		}
-
-		_, err = b.CreateBucketIfNotExists(bucketSeqPending)
+		_, err = b.CreateBucketIfNotExists(bucketPendingHashes)
+		if err != nil {
+			return err
+		}
+		_, err = b.CreateBucketIfNotExists(bucketPendingHashData)
 		if err != nil {
 			return err
 		}
@@ -89,39 +105,50 @@ type Differential struct {
 	cols []string
 }
 
-// Add adds a new item with the given id to the differential database.
-// The object at x will be hashed and the hash will be compared to the stored hash of the same ID.
-// If the hash does not match, or if that ID was not previously seen then the item
-// is put in a pending table to be processed later.
+// Add as a new object x to the list of pending changes.
+// Changes to x are tracked through its given ID which uniquely identifies x across changes.
+// For example, if x was an SQL row then ID would be the primary key of that row.
+//
+// If Add is called multiple times same ID before applying changes then
+// only the latest change will be taken to be applied.
 func (diff *Differential) Add(id []byte, x interface{}) error {
 	return diff.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(diff.q)
-		bhm := b.Bucket(bucketIDHashMap)
-		bsp := b.Bucket(bucketSeqPending)
 
-		hash, err := hashstructure.Hash(x, nil)
+		var (
+			bh = b.Bucket(bucketHashes)
+			bph = b.Bucket(bucketPendingHashes)
+			bphd = b.Bucket(bucketPendingHashData)
+		)
+
+		hash, err := HashOf(x)
 		if err != nil {
 			return err
 		}
 
-		var k = make([]byte, 8)
-		binary.LittleEndian.PutUint64(k, hash)
+		var (
+			existing = bh.Get(id)
+			match = bytes.Compare(existing, hash) == 0
+		)
 
-		compare := bhm.Get(id)
+		if existing == nil || !match {
+			// Delete existing pending changes for a different hash for this ID
+			if pending := bph.Get(id); pending != nil && bytes.Compare(pending, hash) != 0 {
+				if err := bphd.Delete(pending); err != nil {
+					return err
+				}
+			}
 
-		// If the existing row doesn't exist or the SHA1 hash of the row data does not match
-		if compare == nil || bytes.Compare(compare, k) != 0 {
-			// Append this row to list of pending changes
+			// Ensure this ID is ready to be tracked
+			if err := bph.Put(id, hash); err != nil {
+				return err
+			}
+
 			raw, err := msgpack.Marshal(x)
 			if err != nil {
 				return err
 			}
-
-			if err := bhm.Put(id, k); err != nil {
-				return err
-			}
-
-			if err := bsp.Put(id, raw); err != nil {
+			if err := bphd.Put(hash, raw); err != nil {
 				return err
 			}
 		}
@@ -130,23 +157,39 @@ func (diff *Differential) Add(id []byte, x interface{}) error {
 	})
 }
 
-// Count counts the number of entries in the hash tracking table.
+// Changed returns true if the hash of x has changed for its ID.
+func (diff *Differential) Changed(id []byte, x interface{}) (changed bool, err error) {
+	var hash []byte
+	hash, err = HashOf(x)
+	if err != nil {
+		return
+	}
+
+	err = diff.db.View(func(tx *bolt.Tx) error {
+		var compare = tx.Bucket(diff.q).Bucket(bucketHashes).Get(id)
+		changed = bytes.Compare(compare, hash) != 0
+		return nil
+	})
+	return
+}
+
+// CountTracking counts the number of entries in the hash tracking table.
 // In other words, this is the amount of all items tracked by the differential db.
-func (diff *Differential) Count() (count int) {
+func (diff *Differential) CountTracking() (count int) {
 	diff.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(diff.q)
-		count = b.Bucket(bucketIDHashMap).Stats().KeyN
+		count = b.Bucket(bucketHashes).Stats().KeyN
 		return nil
 	})
 
 	return
 }
 
-// PendingChanges returns the number of items in the change pending bucket.
-func (diff *Differential) PendingChanges() (pending int) {
+// CountChanges returns the number of items in the change pending bucket.
+func (diff *Differential) CountChanges() (pending int) {
 	diff.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(diff.q)
-		pending = b.Bucket(bucketSeqPending).Stats().KeyN
+		pending = b.Bucket(bucketPendingHashes).Stats().KeyN
 		return nil
 	})
 
@@ -165,50 +208,64 @@ func (msg *msgpackDecoder) Decode(x interface{}) error {
 	return msgpack.NewDecoder(r).Decode(x)
 }
 
-// Each calls f for each item in the pending changes table.
-// If no error is returned by f then the item is removed from the pending changes.
-// If an error is returned then the item will persist in pending changes to be re-processed at a later date.
-//
-// Each call to f that raises an error will be appended to a multierror slice unless reading the database itself
-// raises an error.
-func (diff *Differential) Each(ctx context.Context, f func(Decoder) error) error {
-	var fe, ue error
 
-	ue = diff.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(diff.q)
-		bsp := b.Bucket(bucketSeqPending)
+// ApplyFunc is a function to be called to apply each pending change
+type ApplyFunc func(id []byte, data Decoder) error
 
-		un := new(msgpackDecoder)
+// Each scans through each change and attempts to
+func (diff *Differential) Each(ctx context.Context, f ApplyFunc) error {
+	tx, err := diff.db.Begin(true)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 
-		cur := bsp.Cursor()
+	b := tx.Bucket(diff.q)
+	var (
+		bh = b.Bucket(bucketHashes)
+		bph = b.Bucket(bucketPendingHashes)
+		bphd = b.Bucket(bucketPendingHashData)
 
-		for id, data := cur.First(); id != nil; id, data = cur.Next() {
-			select {
-			case <-ctx.Done():
-				fe = multierror.Append(fe, ctx.Err())
-				return nil
-			default:
-			}
+		decoder = new(msgpackDecoder)
+		cur = bph.Cursor()
+	)
 
+	var updateErr error
 
-			un.data = data
-			if err := f(un); err != nil {
-				fe = multierror.Append(fe, err)
-				continue
-			}
-			if err := bsp.Delete(id); err != nil {
-				return err
-			}
+scan:
+	for id, hash := cur.First(); id != nil; id, hash = cur.Next() {
+		select {
+		case <-ctx.Done():
+			updateErr = multierror.Append(updateErr, ctx.Err())
+			break scan
+		default:
 		}
 
-		return nil
-	})
+		var data = bphd.Get(hash)
+		if data == nil {
+			panic("missing hash data")
+		}
 
-	// Return any errors raised by BoltDB itself
-	if ue != nil {
-		return ue
+		decoder.data = data
+		if err := f(id, decoder); err != nil {
+			updateErr = multierror.Append(updateErr, err)
+			continue
+		}
+
+		if err := bh.Put(id, hash); err != nil {
+			return err
+		}
+		if err := bph.Delete(id); err != nil {
+			return err
+		}
+		if err := bphd.Delete(hash); err != nil {
+			return err
+		}
 	}
 
-	// Return any errors raised by the f caller
-	return fe
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	return updateErr
 }
