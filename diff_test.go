@@ -1,15 +1,14 @@
 package diffdb
 
 import (
-	"testing"
-	"os"
-	"io/ioutil"
-	"path/filepath"
-	"context"
 	"bytes"
+	"context"
 	"github.com/pkg/errors"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"testing"
 )
-
 
 type DifferentialTestCase struct {
 	ID []byte
@@ -32,7 +31,6 @@ func (tc DifferentialTestCase) Run(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-
 
 	diff, err := db.Open("test")
 	if err != nil {
@@ -85,17 +83,14 @@ func (tc DifferentialTestCase) Run(t *testing.T) {
 		t.Fatalf("Expected 0 items to be pending; got %d", pending)
 	}
 
-
 	if err := diff.Add(tc.ID, tc.Changed); err != nil {
 		t.Fatal(err)
 	}
-
 
 	pending = diff.CountChanges()
 	if pending != 1 {
 		t.Fatalf("Expecting 1 changed items; got %d", pending)
 	}
-
 
 	err = diff.Each(context.Background(), func(id []byte, decoder Decoder) error {
 		if bytes.Compare(id, tc.ID) != 0 {
@@ -117,7 +112,6 @@ func (tc DifferentialTestCase) Run(t *testing.T) {
 	}
 }
 
-
 type structTest struct {
 	Key1 string
 	Key2 int64
@@ -126,18 +120,18 @@ type structTest struct {
 func TestDifferential_Add(t *testing.T) {
 	var cases = []DifferentialTestCase{
 		{
-			ID: []byte("[]byte"),
-			With: []byte("data1"),
+			ID:      []byte("[]byte"),
+			With:    []byte("data1"),
 			Changed: []byte("data2"),
 		},
 		{
-			ID: []byte("string"),
-			With: "string1",
+			ID:      []byte("string"),
+			With:    "string1",
 			Changed: "string2",
 		},
 		{
-			ID: []byte("int64"),
-			With: int64(1),
+			ID:      []byte("int64"),
+			With:    int64(1),
 			Changed: int64(2),
 		},
 		{

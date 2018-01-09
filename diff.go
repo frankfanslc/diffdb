@@ -2,13 +2,13 @@ package diffdb
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"github.com/boltdb/bolt"
 	"github.com/hashicorp/go-multierror"
 	"github.com/mitchellh/hashstructure"
 	"gopkg.in/vmihailenco/msgpack.v2"
 	"os"
-	"context"
 )
 
 func HashOf(x interface{}) ([]byte, error) {
@@ -41,9 +41,9 @@ func New(path string) (*DB, error) {
 }
 
 var (
-	bucketHashes = []byte("_m")
+	bucketHashes          = []byte("_m")
 	bucketPendingHashes   = []byte("_ph")
-	bucketPendingHashData  = []byte("_pd")
+	bucketPendingHashData = []byte("_pd")
 )
 
 type DB struct {
@@ -116,8 +116,8 @@ func (diff *Differential) Add(id []byte, x interface{}) error {
 		b := tx.Bucket(diff.q)
 
 		var (
-			bh = b.Bucket(bucketHashes)
-			bph = b.Bucket(bucketPendingHashes)
+			bh   = b.Bucket(bucketHashes)
+			bph  = b.Bucket(bucketPendingHashes)
 			bphd = b.Bucket(bucketPendingHashData)
 		)
 
@@ -128,29 +128,38 @@ func (diff *Differential) Add(id []byte, x interface{}) error {
 
 		var (
 			existing = bh.Get(id)
-			match = bytes.Compare(existing, hash) == 0
+			match    = bytes.Compare(existing, hash) == 0
 		)
 
-		if existing == nil || !match {
-			// Delete existing pending changes for a different hash for this ID
-			if pending := bph.Get(id); pending != nil && bytes.Compare(pending, hash) != 0 {
-				if err := bphd.Delete(pending); err != nil {
-					return err
-				}
+		// An existing committed hash is identical, no need for changes
+		if match {
+			return nil
+		}
+
+		// Check if pending hash already exists
+		if pending := bph.Get(id); pending != nil {
+
+			// Contents are identical to existing pending version, no need for changes
+			if len(pending) > 0 && bytes.Compare(pending, hash) == 0 {
+				return nil
 			}
 
-			// Ensure this ID is ready to be tracked
-			if err := bph.Put(id, hash); err != nil {
+			if err := bphd.Delete(pending); err != nil {
 				return err
 			}
+		}
 
-			raw, err := msgpack.Marshal(x)
-			if err != nil {
-				return err
-			}
-			if err := bphd.Put(hash, raw); err != nil {
-				return err
-			}
+		// Ensure this ID is ready to be tracked
+		if err := bph.Put(id, hash); err != nil {
+			return err
+		}
+
+		raw, err := msgpack.Marshal(x)
+		if err != nil {
+			return err
+		}
+		if err := bphd.Put(hash, raw); err != nil {
+			return err
 		}
 
 		return nil
@@ -208,7 +217,6 @@ func (msg *msgpackDecoder) Decode(x interface{}) error {
 	return msgpack.NewDecoder(r).Decode(x)
 }
 
-
 // ApplyFunc is a function to be called to apply each pending change
 type ApplyFunc func(id []byte, data Decoder) error
 
@@ -222,12 +230,12 @@ func (diff *Differential) Each(ctx context.Context, f ApplyFunc) error {
 
 	b := tx.Bucket(diff.q)
 	var (
-		bh = b.Bucket(bucketHashes)
-		bph = b.Bucket(bucketPendingHashes)
+		bh   = b.Bucket(bucketHashes)
+		bph  = b.Bucket(bucketPendingHashes)
 		bphd = b.Bucket(bucketPendingHashData)
 
 		decoder = new(msgpackDecoder)
-		cur = bph.Cursor()
+		cur     = bph.Cursor()
 	)
 
 	var updateErr error
