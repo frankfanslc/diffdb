@@ -22,12 +22,6 @@ func HashOf(x interface{}) ([]byte, error) {
 	return hash, nil
 }
 
-// A Decoder decodes serialised byte data of a diff entry into a native object.
-// The object passed to Decode should be the same type added to the diff.
-type Decoder interface {
-	Decode(interface{}) error
-}
-
 // New creates a new hashing database using the given filename
 func New(path string) (*DB, error) {
 	db, err := bolt.Open(path, os.FileMode(0600), nil)
@@ -44,6 +38,7 @@ var (
 	bucketHashes          = []byte("_m")
 	bucketPendingHashes   = []byte("_ph")
 	bucketPendingHashData = []byte("_pd")
+	bucketUserData = []byte("_ud")
 )
 
 type DB struct {
@@ -68,6 +63,10 @@ func (db *DB) Open(name string) (*Differential, error) {
 			return err
 		}
 		_, err = b.CreateBucketIfNotExists(bucketPendingHashData)
+		if err != nil {
+			return err
+		}
+		_, err = b.CreateBucketIfNotExists(bucketUserData)
 		if err != nil {
 			return err
 		}
@@ -205,18 +204,6 @@ func (diff *Differential) CountChanges() (pending int) {
 	return
 }
 
-var _ Decoder = (*msgpackDecoder)(nil)
-
-// msgpackDecoder uses the msgpack library to unmarshal differential data
-type msgpackDecoder struct {
-	data []byte
-}
-
-func (msg *msgpackDecoder) Decode(x interface{}) error {
-	r := bytes.NewReader(msg.data)
-	return msgpack.NewDecoder(r).Decode(x)
-}
-
 // ApplyFunc is a function to be called to apply each pending change
 type ApplyFunc func(id []byte, data Decoder) error
 
@@ -238,7 +225,7 @@ func (diff *Differential) Each(ctx context.Context, f ApplyFunc) error {
 		cur     = bph.Cursor()
 	)
 
-	var updateErr error
+	var updateErr *multierror.Error
 
 scan:
 	for id, hash := cur.First(); id != nil; id, hash = cur.Next() {
@@ -275,5 +262,23 @@ scan:
 		return err
 	}
 
-	return updateErr
+	return updateErr.ErrorOrNil()
+}
+
+// ViewUserData wraps a BoltDB view transaction to allow custom user data to be viewed in the differential database.
+// This could include information such as run times, last exported differential, etc.
+func (diff *Differential) ViewUserData(f func(b *bolt.Bucket) error) error {
+	return diff.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(diff.q).Bucket(bucketUserData)
+		return f(b)
+	})
+}
+
+// UpdateUserData wraps a BoltDB update transaction to allow custom user data to viewed or updated
+// in the differential database.
+func (diff *Differential) UpdateUserData(f func(b *bolt.Bucket) error) error {
+	return diff.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(diff.q).Bucket(bucketUserData)
+		return f(b)
+	})
 }
