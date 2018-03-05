@@ -9,6 +9,11 @@ import (
 	"github.com/mitchellh/hashstructure"
 	"gopkg.in/vmihailenco/msgpack.v2"
 	"os"
+	"errors"
+)
+
+var (
+	ErrConflictingKey = errors.New("diffdb: multiple objects with the same ID were added in the same change version")
 )
 
 func HashOf(x interface{}) ([]byte, error) {
@@ -38,7 +43,8 @@ var (
 	bucketHashes          = []byte("_m")
 	bucketPendingHashes   = []byte("_ph")
 	bucketPendingHashData = []byte("_pd")
-	bucketUserData = []byte("_ud")
+	bucketUserData        = []byte("_ud")
+	bucketKeyConflicts    = []byte("_dk")
 )
 
 type DB struct {
@@ -102,6 +108,32 @@ type Differential struct {
 	q    []byte
 	db   *bolt.DB
 	cols []string
+
+	trackConflicts bool
+}
+
+// MustNotConflict sets a flag to track duplicate IDs given to subsequent calls to Add.
+// This can be used as a debugging tool to check if additions in the same version
+// have conflicting IDs.
+// Calling MustNotConflict will delete any existing conflict information.
+func (diff *Differential) MustNotConflict() error {
+	return diff.db.Update(func(tx *bolt.Tx) error {
+		tx.OnCommit(func(){
+			diff.trackConflicts = true
+		})
+
+		b := tx.Bucket(diff.q)
+		cb := b.Bucket(bucketKeyConflicts)
+		if cb != nil {
+			err := b.DeleteBucket(bucketKeyConflicts)
+			if err != nil {
+				return err
+			}
+		}
+
+		_, err := b.CreateBucket(bucketKeyConflicts)
+		return err
+	})
 }
 
 // Add as a new object x to the list of pending changes.
@@ -119,6 +151,14 @@ func (diff *Differential) Add(id []byte, x interface{}) error {
 			bph  = b.Bucket(bucketPendingHashes)
 			bphd = b.Bucket(bucketPendingHashData)
 		)
+
+		// Check ID conflicts
+		if diff.trackConflicts {
+			bkc := b.Bucket(bucketKeyConflicts)
+			if bkc.Get(id) != nil {
+				return ErrConflictingKey
+			}
+		}
 
 		hash, err := HashOf(x)
 		if err != nil {
@@ -159,6 +199,13 @@ func (diff *Differential) Add(id []byte, x interface{}) error {
 		}
 		if err := bphd.Put(hash, raw); err != nil {
 			return err
+		}
+
+		if diff.trackConflicts {
+			err := b.Bucket(bucketKeyConflicts).Put(id, nil)
+			if err != nil {
+				return err
+			}
 		}
 
 		return nil

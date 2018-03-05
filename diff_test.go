@@ -164,3 +164,41 @@ func TestDifferential_Add(t *testing.T) {
 		t.Run(string(tc.ID), tc.Run)
 	}
 }
+
+
+func TestDifferential_MustNotConflict(t *testing.T) {
+	dir, err := ioutil.TempDir(os.TempDir(), "_diff")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	db, err := New(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	diff, err := db.Open("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := diff.MustNotConflict(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := diff.Add([]byte("1"), struct {}{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := diff.Add([]byte("2"), struct {}{}); err != nil {
+		t.Fatal(err)
+	}
+	err = diff.Add([]byte("1"), struct {}{})
+	if err == nil {
+		t.Fatal("Expected an error to be raised")
+	}
+	if err != ErrConflictingKey {
+		t.Fatalf("Expected %q as error; got %q", ErrConflictingKey, err)
+	}
+}
