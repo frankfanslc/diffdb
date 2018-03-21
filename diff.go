@@ -112,6 +112,11 @@ type Differential struct {
 	trackConflicts bool
 }
 
+
+func (diff *Differential) Name() string {
+	return string(diff.q)
+}
+
 // MustNotConflict sets a flag to track duplicate IDs given to subsequent calls to Add.
 // This can be used as a debugging tool to check if additions in the same version
 // have conflicting IDs.
