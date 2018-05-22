@@ -112,7 +112,6 @@ type Differential struct {
 	trackConflicts bool
 }
 
-
 func (diff *Differential) Name() string {
 	return string(diff.q)
 }
@@ -123,7 +122,7 @@ func (diff *Differential) Name() string {
 // Calling MustNotConflict will delete any existing conflict information.
 func (diff *Differential) MustNotConflict() error {
 	return diff.db.Update(func(tx *bolt.Tx) error {
-		tx.OnCommit(func(){
+		tx.OnCommit(func() {
 			diff.trackConflicts = true
 		})
 
@@ -147,8 +146,8 @@ func (diff *Differential) MustNotConflict() error {
 //
 // If Add is called multiple times same ID before applying changes then
 // only the latest change will be taken to be applied.
-func (diff *Differential) Add(id []byte, x interface{}) error {
-	return diff.db.Update(func(tx *bolt.Tx) error {
+func (diff *Differential) Add(id []byte, x interface{}) (updated bool, err error) {
+	err = diff.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(diff.q)
 
 		var (
@@ -193,6 +192,7 @@ func (diff *Differential) Add(id []byte, x interface{}) error {
 			}
 		}
 
+
 		// Ensure this ID is ready to be tracked
 		if err := bph.Put(id, hash); err != nil {
 			return err
@@ -213,8 +213,10 @@ func (diff *Differential) Add(id []byte, x interface{}) error {
 			}
 		}
 
+		updated = true
 		return nil
 	})
+	return
 }
 
 // Changed returns true if the hash of x has changed for its ID.
@@ -259,8 +261,9 @@ func (diff *Differential) CountChanges() (pending int) {
 // ApplyFunc is a function to be called to apply each pending change
 type ApplyFunc func(id []byte, data Decoder) error
 
-// Each scans through each change and attempts to
-func (diff *Differential) Each(ctx context.Context, f ApplyFunc) error {
+// EachN scans through each change until N items have been processed.
+// If n is <= 0 then all pending changes will be applied.
+func (diff *Differential) EachN(ctx context.Context, f ApplyFunc, n int) error {
 	tx, err := diff.db.Begin(true)
 	if err != nil {
 		return err
@@ -278,6 +281,7 @@ func (diff *Differential) Each(ctx context.Context, f ApplyFunc) error {
 	)
 
 	var updateErr *multierror.Error
+	var i int
 
 scan:
 	for id, hash := cur.First(); id != nil; id, hash = cur.Next() {
@@ -308,6 +312,10 @@ scan:
 		if err := bphd.Delete(hash); err != nil {
 			return err
 		}
+		i ++
+		if n > 0 && n == i {
+			break scan
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -315,6 +323,11 @@ scan:
 	}
 
 	return updateErr.ErrorOrNil()
+}
+
+// Each scans through each change and attempts to
+func (diff *Differential) Each(ctx context.Context, f ApplyFunc) error {
+	return diff.EachN(ctx, f, -1)
 }
 
 // ViewUserData wraps a BoltDB view transaction to allow custom user data to be viewed in the differential database.

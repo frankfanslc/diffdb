@@ -46,7 +46,7 @@ func (tc DifferentialTestCase) Run(t *testing.T) {
 		t.Fatalf("Expected nothing to be changed; got %d", pending)
 	}
 
-	if err := diff.Add(tc.ID, tc.With); err != nil {
+	if _, err := diff.Add(tc.ID, tc.With); err != nil {
 		t.Fatal(err)
 	}
 
@@ -55,7 +55,7 @@ func (tc DifferentialTestCase) Run(t *testing.T) {
 		t.Fatalf("Expected 1 item in pending changes; got %d", pending)
 	}
 
-	if err := diff.Add(tc.ID, tc.With); err != nil {
+	if _, err := diff.Add(tc.ID, tc.With); err != nil {
 		t.Fatal(err)
 	}
 
@@ -83,7 +83,7 @@ func (tc DifferentialTestCase) Run(t *testing.T) {
 		t.Fatalf("Expected 0 items to be pending; got %d", pending)
 	}
 
-	if err := diff.Add(tc.ID, tc.Changed); err != nil {
+	if _, err := diff.Add(tc.ID, tc.Changed); err != nil {
 		t.Fatal(err)
 	}
 
@@ -188,13 +188,13 @@ func TestDifferential_MustNotConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := diff.Add([]byte("1"), struct {}{}); err != nil {
+	if _, err := diff.Add([]byte("1"), struct {}{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := diff.Add([]byte("2"), struct {}{}); err != nil {
+	if _, err := diff.Add([]byte("2"), struct {}{}); err != nil {
 		t.Fatal(err)
 	}
-	err = diff.Add([]byte("1"), struct {}{})
+	_, err = diff.Add([]byte("1"), struct {}{})
 	if err == nil {
 		t.Fatal("Expected an error to be raised")
 	}
