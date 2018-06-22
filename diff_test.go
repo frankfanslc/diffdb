@@ -8,15 +8,30 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
+func NewIDObject(id []byte, o interface{}) IDObject {
+	return IDObject{
+		id:     id,
+		Object: o,
+	}
+}
+
+type IDObject struct {
+	id     []byte
+	Object interface{}
+}
+
+func (o IDObject) ID() []byte {
+	return o.id
+}
+
 type DifferentialTestCase struct {
-	ID []byte
-	// With represents a type to test
-	With interface{}
+	With Object
 	// Changed is a slightly modified version of With
 	// which should generate a different hash.
-	Changed interface{}
+	Changed Object
 }
 
 func (tc DifferentialTestCase) Run(t *testing.T) {
@@ -46,7 +61,7 @@ func (tc DifferentialTestCase) Run(t *testing.T) {
 		t.Fatalf("Expected nothing to be changed; got %d", pending)
 	}
 
-	if _, err := diff.Add(tc.ID, tc.With); err != nil {
+	if _, err := diff.Add(tc.With); err != nil {
 		t.Fatal(err)
 	}
 
@@ -55,7 +70,7 @@ func (tc DifferentialTestCase) Run(t *testing.T) {
 		t.Fatalf("Expected 1 item in pending changes; got %d", pending)
 	}
 
-	if _, err := diff.Add(tc.ID, tc.With); err != nil {
+	if _, err := diff.Add(tc.With); err != nil {
 		t.Fatal(err)
 	}
 
@@ -65,8 +80,8 @@ func (tc DifferentialTestCase) Run(t *testing.T) {
 	}
 
 	err = diff.Each(context.Background(), func(id []byte, decoder Decoder) error {
-		if bytes.Compare(id, tc.ID) != 0 {
-			return errors.Errorf("Expected ID of %x; got %x", tc.ID, id)
+		if bytes.Compare(id, tc.With.ID()) != 0 {
+			return errors.Errorf("Expected ID of %x; got %x", tc.With.ID(), id)
 		}
 		return nil
 	})
@@ -83,7 +98,7 @@ func (tc DifferentialTestCase) Run(t *testing.T) {
 		t.Fatalf("Expected 0 items to be pending; got %d", pending)
 	}
 
-	if _, err := diff.Add(tc.ID, tc.Changed); err != nil {
+	if _, err := diff.Add(tc.Changed); err != nil {
 		t.Fatal(err)
 	}
 
@@ -93,8 +108,8 @@ func (tc DifferentialTestCase) Run(t *testing.T) {
 	}
 
 	err = diff.Each(context.Background(), func(id []byte, decoder Decoder) error {
-		if bytes.Compare(id, tc.ID) != 0 {
-			return errors.Errorf("Expected ID of %x; got %x", tc.ID, id)
+		if bytes.Compare(id, tc.With.ID()) != 0 {
+			return errors.Errorf("Expected ID of %x; got %x", tc.With.ID(), id)
 		}
 		return nil
 	})
@@ -120,51 +135,53 @@ type structTest struct {
 func TestDifferential_Add(t *testing.T) {
 	var cases = []DifferentialTestCase{
 		{
-			ID:      []byte("[]byte"),
-			With:    []byte("data1"),
-			Changed: []byte("data2"),
+			With:    NewIDObject([]byte("[]byte"), []byte("data1")),
+			Changed: NewIDObject([]byte("[]byte"), []byte("data2")),
 		},
 		{
-			ID:      []byte("string"),
-			With:    "string1",
-			Changed: "string2",
+			With:    NewIDObject([]byte("string"), "string1"),
+			Changed: NewIDObject([]byte("string"), "string2"),
 		},
 		{
-			ID:      []byte("int64"),
-			With:    int64(1),
-			Changed: int64(2),
+			With:    NewIDObject([]byte("int64"), int64(1)),
+			Changed: NewIDObject([]byte("int64"), int64(2)),
 		},
 		{
-			ID: []byte("struct"),
-			With: structTest{
+			With: NewIDObject([]byte("struct"), structTest{
 				Key1: "Key1",
 				Key2: 1,
-			},
-			Changed: structTest{
+			}),
+			Changed: NewIDObject([]byte("struct"), structTest{
 				Key1: "Key2",
 				Key2: 2,
-			},
+			}),
 		},
 		{
-			ID: []byte("map"),
-			With: map[string]interface{}{
+			With: NewIDObject([]byte("map"), map[string]interface{}{
 				"Key1": "Value1",
 				"Key2": "Value2",
 				"Key3": "Value3",
-			},
-			Changed: map[string]interface{}{
+			}),
+			Changed: NewIDObject([]byte("map"), map[string]interface{}{
 				"Key1": "AltValue1",
 				"Key2": "AltValue2",
 				"Key3": "AltValue3",
-			},
+			}),
 		},
 	}
 
 	for _, tc := range cases {
-		t.Run(string(tc.ID), tc.Run)
+		t.Run(string(tc.With.ID()), tc.Run)
 	}
 }
 
+type IDMapper struct {
+	id []byte
+}
+
+func (id IDMapper) ID() []byte {
+	return id.id
+}
 
 func TestDifferential_MustNotConflict(t *testing.T) {
 	dir, err := ioutil.TempDir(os.TempDir(), "_diff")
@@ -188,17 +205,40 @@ func TestDifferential_MustNotConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := diff.Add([]byte("1"), struct {}{}); err != nil {
+	if _, err := diff.Add(IDMapper{id: []byte("1")}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := diff.Add([]byte("2"), struct {}{}); err != nil {
+	if _, err := diff.Add(IDMapper{id: []byte("2")}); err != nil {
 		t.Fatal(err)
 	}
-	_, err = diff.Add([]byte("1"), struct {}{})
+	_, err = diff.Add(IDMapper{id: []byte("1")})
 	if err == nil {
 		t.Fatal("Expected an error to be raised")
 	}
 	if err != ErrConflictingKey {
 		t.Fatalf("Expected %q as error; got %q", ErrConflictingKey, err)
+	}
+}
+
+type hashBenchmark struct {
+	A string
+	B int
+	C []string
+	D time.Time
+}
+
+func BenchmarkHash(b *testing.B) {
+	var bench = &hashBenchmark{
+		A: "abc",
+		B: 131241231,
+		C: []string{"6", "1", "732", "2341", "q341", "q34e"},
+		D: time.Now(),
+	}
+
+	for i := 0; i < b.N; i ++ {
+		_, err := HashOf(bench)
+		if err != nil {
+			b.Fatal(err)
+		}
 	}
 }

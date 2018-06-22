@@ -3,28 +3,36 @@ package diffdb
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"github.com/boltdb/bolt"
 	"github.com/hashicorp/go-multierror"
-	"github.com/mitchellh/hashstructure"
 	"gopkg.in/vmihailenco/msgpack.v2"
 	"os"
 	"errors"
+	"github.com/mitchellh/hashstructure"
+	"encoding/binary"
 )
 
 var (
+	// ErrConflictingKey indicates that MustNotConflict() was enabled and a conflicting ID was entered into the state database.
 	ErrConflictingKey = errors.New("diffdb: multiple objects with the same ID were added in the same change version")
 )
 
+// An Object is a Go object passed to a differential database to track changes on.
+// The object must be encodable by msgpack.
+type Object interface {
+	ID() []byte
+}
+
+
+
 func HashOf(x interface{}) ([]byte, error) {
-	// Generate the hash using hashstructure
-	huint64, err := hashstructure.Hash(x, nil)
+	i, err := hashstructure.Hash(x, nil)
 	if err != nil {
 		return nil, err
 	}
-	var hash = make([]byte, 8)
-	binary.LittleEndian.PutUint64(hash, huint64)
-	return hash, nil
+	b := make([]byte, 8)
+	binary.LittleEndian.PutUint64(b, i)
+	return b, nil
 }
 
 // New creates a new hashing database using the given filename
@@ -47,6 +55,7 @@ var (
 	bucketKeyConflicts    = []byte("_dk")
 )
 
+// A DB is a wrapper around a BoltDB to open multiple differential buckets
 type DB struct {
 	db *bolt.DB
 }
@@ -140,81 +149,122 @@ func (diff *Differential) MustNotConflict() error {
 	})
 }
 
+// AddTx adds an object to start tracking by using an existing BoltDB transaction.
+func (diff *Differential) AddTx(tx *bolt.Tx, obj Object) (bool, error) {
+	b := tx.Bucket(diff.q)
+
+	var (
+		bh   = b.Bucket(bucketHashes)
+		bph  = b.Bucket(bucketPendingHashes)
+		bphd = b.Bucket(bucketPendingHashData)
+	)
+
+	id := obj.ID()
+
+	// Check ID conflicts
+	if diff.trackConflicts {
+		bkc := b.Bucket(bucketKeyConflicts)
+		if bkc.Get(id) != nil {
+			return false, ErrConflictingKey
+		}
+	}
+
+	hash, err := HashOf(obj)
+	if err != nil {
+		return false, err
+	}
+
+	var (
+		existing = bh.Get(id)
+		match    = bytes.Compare(existing, hash) == 0
+	)
+
+	// An existing committed hash is identical, no need for changes
+	if match {
+		return false, nil
+	}
+
+	// Check if pending hash already exists
+	if pending := bph.Get(id); pending != nil {
+
+		// Contents are identical to existing pending version, no need for changes
+		if len(pending) > 0 && bytes.Compare(pending, hash) == 0 {
+			return false, nil
+		}
+
+		if err := bphd.Delete(pending); err != nil {
+			return false, err
+		}
+	}
+
+	// Ensure this ID is ready to be tracked
+	if err := bph.Put(id, hash); err != nil {
+		return false, err
+	}
+
+	raw, err := msgpack.Marshal(obj)
+	if err != nil {
+		return false, err
+	}
+	if err := bphd.Put(hash, raw); err != nil {
+		return false, err
+	}
+
+	if diff.trackConflicts {
+		err := b.Bucket(bucketKeyConflicts).Put(id, nil)
+		if err != nil {
+			return false, err
+		}
+	}
+
+	return true, nil
+}
+
+// AddChan adds objects sent from a channel until the channel is closed, the object is nil,  or the context is cancelled.
+// AddChan may stop processing the stream if an error occurs in which case no more messages will be consumed
+// and that error will be returned.
+func (diff *Differential) AddChan(ctx context.Context, stream <-chan Object) error {
+	tx, err := diff.db.Begin(true)
+	if err != nil {
+		return err
+	}
+
+	defer tx.Rollback()
+
+	var obj Object
+	var i int
+	for ; ; i ++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case obj = <-stream:
+			if obj == nil {
+				return tx.Commit()
+			}
+		}
+
+		updated, err := diff.AddTx(tx, obj)
+		if err != nil {
+			return err
+		}
+		if !updated {
+			i --
+			continue
+		}
+	}
+}
+
 // Add as a new object x to the list of pending changes.
 // Changes to x are tracked through its given ID which uniquely identifies x across changes.
 // For example, if x was an SQL row then ID would be the primary key of that row.
 //
 // If Add is called multiple times same ID before applying changes then
 // only the latest change will be taken to be applied.
-func (diff *Differential) Add(id []byte, x interface{}) (updated bool, err error) {
+func (diff *Differential) Add(obj Object) (updated bool, err error) {
 	err = diff.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(diff.q)
-
-		var (
-			bh   = b.Bucket(bucketHashes)
-			bph  = b.Bucket(bucketPendingHashes)
-			bphd = b.Bucket(bucketPendingHashData)
-		)
-
-		// Check ID conflicts
-		if diff.trackConflicts {
-			bkc := b.Bucket(bucketKeyConflicts)
-			if bkc.Get(id) != nil {
-				return ErrConflictingKey
-			}
-		}
-
-		hash, err := HashOf(x)
-		if err != nil {
-			return err
-		}
-
-		var (
-			existing = bh.Get(id)
-			match    = bytes.Compare(existing, hash) == 0
-		)
-
-		// An existing committed hash is identical, no need for changes
-		if match {
-			return nil
-		}
-
-		// Check if pending hash already exists
-		if pending := bph.Get(id); pending != nil {
-
-			// Contents are identical to existing pending version, no need for changes
-			if len(pending) > 0 && bytes.Compare(pending, hash) == 0 {
-				return nil
-			}
-
-			if err := bphd.Delete(pending); err != nil {
-				return err
-			}
-		}
-
-
-		// Ensure this ID is ready to be tracked
-		if err := bph.Put(id, hash); err != nil {
-			return err
-		}
-
-		raw, err := msgpack.Marshal(x)
-		if err != nil {
-			return err
-		}
-		if err := bphd.Put(hash, raw); err != nil {
-			return err
-		}
-
-		if diff.trackConflicts {
-			err := b.Bucket(bucketKeyConflicts).Put(id, nil)
-			if err != nil {
-				return err
-			}
-		}
-
-		updated = true
-		return nil
+		var e error
+		updated, e = diff.AddTx(tx, obj)
+		return e
 	})
 	return
 }
@@ -325,7 +375,7 @@ scan:
 	return updateErr.ErrorOrNil()
 }
 
-// Each scans through each change and attempts to
+// Each scans through each change and attempts to apply f() to each item waiting to be changed
 func (diff *Differential) Each(ctx context.Context, f ApplyFunc) error {
 	return diff.EachN(ctx, f, -1)
 }
