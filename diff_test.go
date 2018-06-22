@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+	"strconv"
+	"github.com/hashicorp/go-multierror"
 )
 
 func NewIDObject(id []byte, o interface{}) IDObject {
@@ -217,6 +219,67 @@ func TestDifferential_MustNotConflict(t *testing.T) {
 	}
 	if err != ErrConflictingKey {
 		t.Fatalf("Expected %q as error; got %q", ErrConflictingKey, err)
+	}
+}
+
+// Test that when a context is cancelled the currently applied changes up that point are
+// still committed to the database.
+func TestDifferential_Each_ContextCommit(t *testing.T) {
+	dir, err := ioutil.TempDir(os.TempDir(), "_diff")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	db, err := New(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	diff, err := db.Open("test_context_commit")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 10; i ++ {
+		_, err := diff.Add(NewIDObject([]byte(strconv.Itoa(i)), i))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if diff.CountChanges() != 10 {
+		t.Fatalf("Expected 10 changes; got %d", diff.CountChanges())
+	}
+
+	var x int
+	ctx, cancel := context.WithCancel(context.Background())
+	err = diff.Each(ctx, func(id []byte, data Decoder) error {
+		x++
+		if x == 4 {
+			cancel()
+		}
+		return nil
+	})
+	if x != 4 {
+		t.Fatalf("expected 4 items to be processed; got %d", x)
+	}
+
+	var ok bool
+	ei := err.(*multierror.Error)
+	for _, e := range ei.Errors {
+		if e == context.Canceled {
+			ok = true
+		}
+	}
+	if !ok {
+		t.Fatal("expected context cancelled error")
+	}
+
+	pending := diff.CountChanges()
+	if pending != 6 {
+		t.Fatalf("Expected 6 remaining changes; got %d", pending)
 	}
 }
 
